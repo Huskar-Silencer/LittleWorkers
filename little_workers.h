@@ -4,7 +4,6 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <exception>
@@ -22,19 +21,20 @@ namespace littleworkers {
 class LittleWorkers {
   using ThreadPtrType = std::shared_ptr<std::thread>;
   using TaskFuncType = std::function<void()>;
+  using TaskFuncVecType = std::vector<TaskFuncType>;
   using TaskQueueType = std::deque<TaskFuncType>;
-  using TaskVectorType = std::vector<TaskFuncType>;
   using PoolMutexType = std::mutex;
   using PoolCondType = std::condition_variable;
   using AtomicUInt32Type = std::atomic<uint32_t>;
-  using ChronoMilliSecType = std::chrono::milliseconds;
-
-  struct GroupState;
+  using AtomicUInt64Type = std::atomic<uint64_t>;
+  using ChronoMsType = std::chrono::milliseconds;
 
   static constexpr uint32_t kDefaultMaxThreadSize = 4;
   static constexpr uint32_t kDefaultCoreThreadSize = 1;
   static constexpr uint32_t kDefaultTaskQueueSize = 512;
   static constexpr uint32_t kDefaultTimeoutMs = 60 * 1000;
+
+  struct GroupState;
 
  public:
   enum class RejectPolicy {
@@ -47,7 +47,7 @@ class LittleWorkers {
   struct Options {
     uint32_t core_thread_size = kDefaultCoreThreadSize;
     uint32_t max_thread_size = kDefaultMaxThreadSize;
-    ChronoMilliSecType keep_alive = ChronoMilliSecType(kDefaultTimeoutMs);
+    ChronoMsType keep_alive = ChronoMsType(kDefaultTimeoutMs);
     size_t queue_capacity = kDefaultTaskQueueSize;
     RejectPolicy reject_policy = RejectPolicy::kAbort;
     bool allow_core_thread_timeout = false;
@@ -57,6 +57,7 @@ class LittleWorkers {
    public:
     explicit TaskGroup(std::shared_ptr<GroupState> state)
         : state_(std::move(state)) {}
+
     void get() const;
 
    private:
@@ -70,11 +71,12 @@ class LittleWorkers {
     PoolCondType cond;
     PoolCondType stop_cond;
     AtomicUInt32Type thread_size{0};
+    AtomicUInt64Type completed_tasks{0};
     bool is_stop = false;
 
     uint32_t core_thread_size;
     uint32_t max_thread_size;
-    ChronoMilliSecType keep_alive;
+    ChronoMsType keep_alive;
     size_t queue_capacity;
     RejectPolicy reject_policy;
     bool allow_core_thread_timeout = false;
@@ -131,8 +133,9 @@ class LittleWorkers {
 
   void Stop() const;
   void WaitAll() const;
+  [[nodiscard]] bool AwaitTermination(ChronoMsType timeout) const;
   void SetAllowCoreThreadTimeOut(bool value) const;
-  [[nodiscard]] TaskVectorType StopNow() const;
+  [[nodiscard]] TaskFuncVecType StopNow() const;
 
   [[nodiscard]] bool IsStopped() const {
     std::lock_guard lock(state_->mutex);
@@ -143,13 +146,22 @@ class LittleWorkers {
     return state_->thread_size.load();
   }
 
+  [[nodiscard]] size_t QueueSize() const {
+    std::lock_guard lock(state_->mutex);
+    return state_->task_queue.size();
+  }
+
+  [[nodiscard]] uint64_t CompletedTaskCount() const {
+    return state_->completed_tasks.load();
+  }
+
   ~LittleWorkers() {
     Stop();
     WaitAll();
   }
 
   template <typename F, typename... Args>
-  auto Submit(F&& func, Args&&... args)
+  [[nodiscard]] auto Submit(F&& func, Args&&... args)
       -> std::future<std::invoke_result_t<F, Args...>> {
     using ReturnType = std::invoke_result_t<F, Args...>;
     using TaskWrapper = std::packaged_task<ReturnType()>;
@@ -170,13 +182,18 @@ class LittleWorkers {
   }
 
   template <typename... Fs>
-  TaskGroup SubmitGroup(Fs&&... funcs) {
+  [[nodiscard]] std::enable_if_t<(std::is_invocable_v<std::decay_t<Fs>> && ...),
+                                 TaskGroup>
+  SubmitGroup(Fs&&... funcs) {
     constexpr size_t kCount = sizeof...(Fs);
     auto state = std::make_shared<GroupState>();
     state->remaining = static_cast<uint32_t>(kCount);
     (submitIntoGroup(state, std::forward<Fs>(funcs)), ...);
     return TaskGroup(std::move(state));
   }
+
+  [[nodiscard]] TaskGroup SubmitGroup(
+      std::vector<std::function<void()>> tasks) const;
 };
 }  // namespace littleworkers
 

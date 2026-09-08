@@ -73,12 +73,16 @@ int main() {
 | `Submit(f, args...)`                                | Enqueue a task, returns `std::future<Result>`.                                            |
 | `Post(f, args...)`                                  | Enqueue a fire-and-forget task; no `std::future` is created (Java's `execute(Runnable)`). |
 | `SubmitGroup(fs...)`                                | Enqueue several tasks in one call; returns a `TaskGroup`.                                 |
+| `SubmitGroup(vector<fn()>)`                         | Enqueue a container of tasks (e.g. built in a loop); returns a `TaskGroup`.               |
 | `TaskGroup::get()`                                  | Block until every task in the group completes; rethrows the first exception, if any.      |
 | `Stop()`                                            | No new tasks accepted; queued tasks still run to completion.                              |
 | `StopNow()`                                         | Stop and return the still-queued tasks (running tasks finish).                            |
 | `WaitAll()`                                         | Block until every worker has exited. Only returns after `Stop()`/`StopNow()`.             |
+| `AwaitTermination(timeout)`                         | Like `WaitAll()` but with a timeout; returns `false` on timeout.                          |
 | `SetAllowCoreThreadTimeOut(bool)`                   | Enable/disable core-thread timeout at runtime.                                            |
 | `ThreadSize()`                                      | Current number of live worker threads.                                                    |
+| `QueueSize()`                                       | Number of tasks currently waiting in the queue.                                           |
+| `CompletedTaskCount()`                              | Total number of tasks completed so far.                                                   |
 | `IsStopped()`                                       | Whether the pool has been stopped.                                                        |
 
 ### `Options`
@@ -141,3 +145,6 @@ Business-scenario tests live under `tests/` and are registered with CTest:
 - `test_post` — fire-and-forget `Post` tasks all run to completion.
 - `test_group` — `SubmitGroup`/`TaskGroup::get()` waits for all tasks, exception propagation, empty and heterogeneous
   groups.
+- `test_group_business` — group-based business scenarios: health checks, quote aggregation, sharded sum, settlement
+  failure.
+- `test_lifecycle` — `AwaitTermination`, `QueueSize`, `CompletedTaskCount`, and `SubmitGroup(container)`.

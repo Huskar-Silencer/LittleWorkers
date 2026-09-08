@@ -7,9 +7,7 @@ namespace littleworkers {
 void LittleWorkers::TaskGroup::get() const {
   std::unique_lock lock(state_->mutex);
   state_->cv.wait(lock, [this] { return state_->remaining.load() == 0; });
-  if (state_->first_exception) {
-    std::rethrow_exception(state_->first_exception);
-  }
+  if (state_->first_exception) std::rethrow_exception(state_->first_exception);
 }
 
 LittleWorkers::LittleWorkers(const Options& options)
@@ -39,24 +37,28 @@ void LittleWorkers::execute(TaskFuncType task) const {
   bool create_core = false;
   bool create_noncore = false;
   bool should_reject = false;
+  bool enqueued = false;
   {
     std::lock_guard lock(state_->mutex);
-    if (state_->is_stop) {
-      should_reject = true;
-    } else if (state_->thread_size.load() < state_->core_thread_size) {
+    if (state_->is_stop) return;
+    if (state_->thread_size.load() < state_->core_thread_size) {
       state_->thread_size.fetch_add(1);
       create_core = true;
     } else if (state_->queue_capacity == 0 ||
                state_->task_queue.size() < state_->queue_capacity) {
       state_->task_queue.emplace_back(std::move(task));
-      state_->cond.notify_one();
-      return;
+      enqueued = true;
     } else if (state_->thread_size.load() < state_->max_thread_size) {
       state_->thread_size.fetch_add(1);
       create_noncore = true;
     } else {
       should_reject = true;
     }
+  }
+
+  if (enqueued) {
+    state_->cond.notify_one();
+    return;
   }
 
   if (create_core) {
@@ -86,14 +88,18 @@ void LittleWorkers::startWorker(TaskFuncType first_task,
 void LittleWorkers::threadRun(ThreadRunParam param) {
   const PoolStatePtrType state = std::move(param.state);
   const bool is_core = param.is_core;
+
   TaskFuncType task = std::move(param.first_task);
-  while (task || ((task = getTaskFromQueue(state, is_core)))) {
+  if (!task) task = getTaskFromQueue(state, is_core);
+  while (task) {
     try {
       task();
     } catch (...) {
     }
-    task = nullptr;
+    state->completed_tasks.fetch_add(1, std::memory_order_relaxed);
+    task = getTaskFromQueue(state, is_core);
   }
+
   state->thread_size.fetch_sub(1);
   state->stop_cond.notify_all();
   param.thread_ptr->detach();
@@ -119,8 +125,9 @@ LittleWorkers::TaskFuncType LittleWorkers::getTaskFromQueue(
             state->thread_size.load() > 1 || state->task_queue.empty();
         if (can_shrink && safe) return nullptr;
       }
-    } else
+    } else {
       state->cond.wait(lock);
+    }
   }
 }
 
@@ -132,13 +139,16 @@ void LittleWorkers::reject(TaskFuncType task) const {
       task();
       return;
     case RejectPolicy::kDiscardOldest: {
-      std::lock_guard lock(state_->mutex);
-      if (state_->task_queue.empty()) {
-        return;
+      bool enqueued = false;
+      {
+        std::lock_guard lock(state_->mutex);
+        if (!state_->task_queue.empty()) {
+          state_->task_queue.pop_front();
+          state_->task_queue.push_back(std::move(task));
+          enqueued = true;
+        }
       }
-      state_->task_queue.pop_front();
-      state_->task_queue.push_back(std::move(task));
-      state_->cond.notify_one();
+      if (enqueued) state_->cond.notify_one();
       return;
     }
     case RejectPolicy::kAbort:
@@ -156,8 +166,8 @@ void LittleWorkers::Stop() const {
   state_->cond.notify_all();
 }
 
-LittleWorkers::TaskVectorType LittleWorkers::StopNow() const {
-  std::vector<TaskFuncType> pending;
+LittleWorkers::TaskFuncVecType LittleWorkers::StopNow() const {
+  TaskFuncVecType pending;
   {
     std::lock_guard lock(state_->mutex);
     if (state_->is_stop) return pending;
@@ -177,6 +187,13 @@ void LittleWorkers::WaitAll() const {
                          [this] { return state_->thread_size.load() == 0; });
 }
 
+bool LittleWorkers::AwaitTermination(
+    const std::chrono::milliseconds timeout) const {
+  std::unique_lock lock(state_->mutex);
+  return state_->stop_cond.wait_for(
+      lock, timeout, [this] { return state_->thread_size.load() == 0; });
+}
+
 void LittleWorkers::SetAllowCoreThreadTimeOut(const bool value) const {
   std::lock_guard lock(state_->mutex);
   if (value && (state_->core_thread_size == 0 ||
@@ -188,4 +205,15 @@ void LittleWorkers::SetAllowCoreThreadTimeOut(const bool value) const {
   state_->allow_core_thread_timeout = value;
   state_->cond.notify_all();
 }
+
+LittleWorkers::TaskGroup LittleWorkers::SubmitGroup(
+    TaskFuncVecType tasks) const {
+  auto state = std::make_shared<GroupState>();
+  state->remaining = static_cast<uint32_t>(tasks.size());
+  for (auto& task : tasks) {
+    submitIntoGroup(state, std::move(task));
+  }
+  return TaskGroup(std::move(state));
+}
+
 }  // namespace littleworkers
