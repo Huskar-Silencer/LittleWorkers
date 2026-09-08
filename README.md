@@ -1,6 +1,6 @@
 # LittleWorkers
 
-A small, header-level C++17 thread pool
+LittleWorkers is a lightweight C++17 thread pool library, designed to provide a simple, efficient and fully functional task scheduling capability for C++ projects.
 
 ## Features
 
